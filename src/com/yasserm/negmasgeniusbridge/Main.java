@@ -276,7 +276,7 @@ class NegLoader {
 	}
 
 	public void on_negotiation_end(String agent_uuid, String bid_str) {
-		Bid bid = bid_str == null ? null : agent_uuid, bid_str;
+		Bid bid = bid_str == null ? null : str2bid(agent_uuid, bid_str);
 		if (is_party.get(agent_uuid)) {
 			AbstractNegotiationParty agent = (AbstractNegotiationParty) parties.get(agent_uuid);
 			agent.negotiationEnded(bid);
@@ -579,7 +579,7 @@ class NegLoader {
 		GatewayServer server = new GatewayServer(app, port);
 		server.start();
 		int listening_port = server.getListeningPort();
-		System.out.format("Gateway to python started at port %d listening to port %d\n", port, listening_port);
+		System.out.format("Gateway v0.1 to python started at port %d listening to port %d\n", port, listening_port);
 
 		if (dieOnBrokenPipe) {
 			/*
