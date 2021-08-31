@@ -1,28 +1,29 @@
 package com.yasserm.negmasgeniusbridge;
+
 import java.io.*;
+import java.net.URL;
+import java.util.*;
 import java.util.logging.*;
 import java.util.jar.JarEntry;
 import java.util.jar.JarInputStream;
 import java.lang.Class;
 import java.nio.charset.Charset;
+
+import genius.core.*;
+import genius.core.protocol.Protocol;
+import genius.core.repository.AgentRepItem;
+import genius.core.repository.DomainRepItem;
+import genius.core.repository.ProfileRepItem;
+import genius.core.repository.ProtocolRepItem;
+import genius.core.tournament.VariablesAndValues.AgentParamValue;
+import genius.core.tournament.VariablesAndValues.AgentParameterVariable;
 import py4j.GatewayServer;
 
-import java.util.HashMap;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.UUID;
-import genius.core.AgentID;
-import genius.core.Bid;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
 //import genius.core.exceptions.NegotiationPartyTimeoutException;
 import genius.core.session.ExecutorWithTimeout;
-import genius.core.Deadline;
-import genius.core.AgentAdapter;
-import genius.core.DeadlineType;
-import genius.core.Domain;
-import genius.core.DomainImpl;
 import genius.core.actions.Accept;
 import genius.core.actions.Inform;
 import genius.core.actions.Action;
@@ -41,11 +42,12 @@ import genius.core.timeline.DiscreteTimeline;
 import genius.core.timeline.TimeLineInfo;
 import genius.core.utility.AbstractUtilitySpace;
 import genius.core.utility.AdditiveUtilitySpace;
+import genius.core.protocol.StackedAlternatingOffersProtocol;
 import py4j.Py4JNetworkException;
 
 import java.util.concurrent.ThreadLocalRandom;
 
-import java.util.Map;
+import java.util.logging.Logger;
 
 class MapUtil {
 	public static String mapToString(Map<String, String> map, String entry_separator, String internal_separator) {
@@ -122,7 +124,7 @@ class NegLoader {
 	private long global_timeout = 180;
 	private boolean force_timeout = true;
 	private boolean force_any_timeout = true;
-    private boolean force_timeout_init = false;
+	private boolean force_timeout_init = false;
 	private boolean force_timeout_end = false;
 	private Logger logger = null;
 	private boolean logging = true;
@@ -130,7 +132,11 @@ class NegLoader {
 	public class Serialize implements Serializable {
 	}
 
-	public NegLoader(boolean is_debug, boolean force_timeout, boolean force_timeout_init, boolean force_timeout_end, long timeout,boolean logging, Logger logger) {
+	public NegLoader(){
+	    this(false, false, false, false, 0, false, null);
+	}
+	public NegLoader(boolean is_debug, boolean force_timeout, boolean force_timeout_init, boolean force_timeout_end,
+			long timeout, boolean logging, Logger logger) {
 		this.logger = logger;
 		this.logging = logging;
 		this.is_debug = is_debug;
@@ -156,7 +162,8 @@ class NegLoader {
 		string2issues = new HashMap<String, HashMap<String, Issue>>();
 	}
 
-	/// Python Hooks: Methods called from python (they all have python snake_case naming convension)
+	/// Python Hooks: Methods called from python (they all have python snake_case
+	/// naming convension)
 	public String test(String class_name) {
 		info(String.format("Test is called with class-name %s", class_name));
 		ArrayList classes = new ArrayList();
@@ -212,9 +219,9 @@ class NegLoader {
 
 			if (is_debug) {
 				String msg = String.format("Creating Agent of type %s (ID= %s)\n", class_name, uuid);
-				System.out.print(msg);
+//				System.out.print(msg);
 				info(msg);
-				System.out.flush();
+//				System.out.flush();
 			} else {
 				this.printStatus();
 			}
@@ -225,6 +232,25 @@ class NegLoader {
 		return "";
 	}
 
+	public double get_time(String agent_uuid){
+		Boolean isparty = is_party.get(agent_uuid);
+		if (isparty == null)
+			return -1;
+	    if (isparty){
+			AbstractNegotiationParty agent = parties.get(agent_uuid);
+			TimeLineInfo timeline = agent.getTimeLine();
+			if (timeline == null)
+				return -2;
+			return timeline.getTime();
+		}else {
+			Agent agent = (Agent) agents.get(agent_uuid);
+			if (agent.timeline == null)
+				return -3;
+			return agent.timeline.getTime();
+		}
+
+	}
+
 	public void on_negotiation_start(String agent_uuid, int n_agents, long n_steps, long time_limit, boolean real_time,
 			String domain_file_name, String utility_file_name, long agent_timeout) {
 		this.n_agents = n_agents;
@@ -232,11 +258,16 @@ class NegLoader {
 		if (isparty == null) {
 			if (is_debug) {
 				String msg = String.format("Agent %s does not exist", agent_uuid);
-				System.out.print(msg);
+//				System.out.print(msg);
 				info(msg);
-				System.out.flush();
+//				System.out.flush();
 			}
 			return;
+		}
+		if (is_debug){
+			String msg = String.format("Domain file: %s\nUfun: %s\nAgent: %s", domain_file_name, utility_file_name, agent_uuid);
+			info(msg);
+//			System.out.println(msg);
 		}
 		if (isparty) {
 			AbstractNegotiationParty agent = this.parties.get(agent_uuid);
@@ -258,10 +289,11 @@ class NegLoader {
 					});
 				} catch (TimeoutException e) {
 					String msg = "Negotiating party " + agent_uuid + " timed out in init() method.";
+					if (logger != null) logger.info(msg);
 				} catch (ExecutionException e) {
 					String msg = "Negotiating party " + agent_uuid + " threw an exception in init() method.";
+					if (logger != null) logger.info(msg);
 				}
-
 			} else {
 				agent.init(info);
 			}
@@ -285,9 +317,10 @@ class NegLoader {
 					});
 				} catch (TimeoutException e) {
 					String msg = "Negotiating party " + agent_uuid + " timed out in init() method.";
+					if (logger != null) logger.info(msg);
 				} catch (ExecutionException e) {
-
 					String msg = "Negotiating party " + agent_uuid + " threw an exception in init() method.";
+					if (logger != null) logger.info(msg);
 				}
 			} else {
 				agent.init(info);
@@ -296,50 +329,51 @@ class NegLoader {
 		n_total_negotiations++;
 		n_active_negotiations++;
 		if (is_debug) {
-			String msg = String.format("Agent %s: time limit %d, step limit %d\n", getAgentName(agent_uuid), time_limit, n_steps);
-			System.out.print(msg);
+			String msg = String.format("Agent %s: time limit %d, step limit %d\n", getAgentName(agent_uuid), time_limit,
+					n_steps);
+//			System.out.print(msg);
 			info(msg);
-			System.out.flush();
+//			System.out.flush();
 		} else {
 			printStatus();
 		}
 	}
 
-	public String choose_action(String agent_uuid) {
+	public String choose_action(String agent_uuid, int round) {
 		n_total_responses++;
 		// System.out.format("Entered choose actino");
 		Boolean isparty = is_party.get(agent_uuid);
 		if (isparty == null) {
 			if (is_debug) {
 				String msg = String.format("Agent %s does not exist", agent_uuid);
-				System.out.print(msg);
+//				System.out.print(msg);
 				info(msg);
-				System.out.flush();
+//				System.out.flush();
 			}
 			return "";
 		}
 		if (isparty)
-			return chooseActionParty(agent_uuid);
-		return chooseActionAgent(agent_uuid);
+			return chooseActionParty(agent_uuid, round);
+		return chooseActionAgent(agent_uuid, round);
 	}
 
-	public Boolean receive_message(String agent_uuid, String from_id, String typeOfAction, String bid_str) {
+	public Boolean receive_message(String agent_uuid, String from_id, String typeOfAction, String bid_str, int round) {
 		n_total_offers++;
 		boolean result;
 		Boolean isparty = is_party.get(agent_uuid);
 		if (isparty == null) {
 			if (is_debug) {
 				String msg = String.format("Agent %s does not exist", agent_uuid);
-				System.out.print(msg);
+//				System.out.print(msg);
 				info(msg);
-				System.out.flush();
+//				System.out.flush();
 			}
 			return false;
 		}
 		if (isparty)
-			result = receiveMessageParty(agent_uuid, from_id, typeOfAction, bid_str);
+			result = receiveMessageParty(agent_uuid, from_id, typeOfAction, bid_str, round);
 		else
-			result = receiveMesasgeAgent(agent_uuid, from_id, typeOfAction, bid_str);
+			result = receiveMesasgeAgent(agent_uuid, from_id, typeOfAction, bid_str, round);
 		return result;
 	}
 
@@ -347,9 +381,9 @@ class NegLoader {
 		if (ids.get(agent_uuid) == null) {
 			if (is_debug) {
 				String msg = String.format("Agent %s does not exist", agent_uuid);
-				System.out.print(msg);
+//				System.out.print(msg);
 				info(msg);
-				System.out.flush();
+//				System.out.flush();
 			}
 			return;
 		}
@@ -361,9 +395,9 @@ class NegLoader {
 		if (ids.get(agent_uuid) == null) {
 			if (is_debug) {
 				String msg = String.format("Agent %s does not exist", agent_uuid);
-				System.out.print(msg);
+//				System.out.print(msg);
 				info(msg);
-				System.out.flush();
+//				System.out.flush();
 			}
 			return;
 		}
@@ -377,9 +411,9 @@ class NegLoader {
 		if (isparty == null) {
 			if (is_debug) {
 				String msg = String.format("Agent %s does not exist", agent_uuid);
-				System.out.print(msg);
+//				System.out.print(msg);
 				info(msg);
-				System.out.flush();
+//				System.out.flush();
 			}
 			return;
 		}
@@ -396,9 +430,11 @@ class NegLoader {
 					});
 				} catch (TimeoutException e) {
 					String msg = "Negotiating party " + agent_uuid + " timed out in negotiationEnded() method.";
+					if (logger != null) logger.info(msg);
 				} catch (ExecutionException e) {
 					String msg = "Negotiating party " + agent_uuid
 							+ " threw an exception in negotiationEnded() method.";
+					if (logger != null) logger.info(msg);
 				}
 			} else {
 				agent.negotiationEnded(bid);
@@ -418,9 +454,11 @@ class NegLoader {
 					});
 				} catch (TimeoutException e) {
 					String msg = "Negotiating party " + agent_uuid + " timed out in negotiationEnded() method.";
+					if (logger != null) logger.info(msg);
 				} catch (ExecutionException e) {
 					String msg = "Negotiating party " + agent_uuid
 							+ " threw an exception in negotiationEnded() method.";
+					if (logger != null) logger.info(msg);
 				}
 			} else {
 				agent.negotiationEnded(bid);
@@ -446,9 +484,9 @@ class NegLoader {
 		n_active_agents--;
 		if (is_debug) {
 			String msg = String.format("Agent %s destroyed\n", agent_uuid);
-			System.out.print(msg);
+//			System.out.print(msg);
 			info(msg);
-			System.out.flush();
+//			System.out.flush();
 		} else {
 			printStatus();
 		}
@@ -475,9 +513,9 @@ class NegLoader {
 		System.gc();
 		if (is_debug) {
 			String msg = String.format("All agents destroyed");
-			System.out.print(msg);
+//			System.out.print(msg);
 			info(msg);
-			System.out.flush();
+//			System.out.flush();
 		} else {
 			printStatus();
 		}
@@ -490,28 +528,28 @@ class NegLoader {
 
 	public void kill_threads(int wait_time) {
 		/**
-		 * Tries to interrupt all threads (except the main), waits for the
-		 * wait_time in milliseconds then kills them all.
+		 * Tries to interrupt all threads (except the main), waits for the wait_time in
+		 * milliseconds then kills them all.
 		 */
 		info("Kill threads was sent to this bridge");
 		Thread current = Thread.currentThread();
-		for (Thread t : Thread.getAllStackTraces().keySet())
-		{  if (current != t && t.getState()==Thread.State.RUNNABLE)
-			t.interrupt();
+		for (Thread t : Thread.getAllStackTraces().keySet()) {
+			if (current != t && t.getState() == Thread.State.RUNNABLE)
+				t.interrupt();
 		}
 
 		try {
 			Thread.sleep(wait_time);
 		} catch (InterruptedException e) {
 			String msg = String.format("Main thread interrupted!!");
-			System.out.print(msg);
+//			System.out.print(msg);
 			info(msg);
 			current.interrupt();
 			return;
 		}
-		for (Thread t : Thread.getAllStackTraces().keySet())
-		{  if (current != t && t.getState()==Thread.State.RUNNABLE)
-			t.stop();
+		for (Thread t : Thread.getAllStackTraces().keySet()) {
+			if (current != t && t.getState() == Thread.State.RUNNABLE)
+				t.stop();
 		}
 	}
 
@@ -520,14 +558,20 @@ class NegLoader {
 		this.shutdown();
 		System.exit(0);
 	}
+
 	/* --------------------------------------------------- */
 	/// Negotiation Callbacks used by Python-hook methods.
 	/// these are the only methods that call the Genius Agent.
 	/* --------------------------------------------------- */
-	private String chooseActionAgent(String agent_uuid) {
+	private String chooseActionAgent(String agent_uuid, int round) {
 		AgentAdapter agent = agents.get(agent_uuid);
 		boolean isFirstTurn = first_actions.get(agent_uuid);
-		TimeLineInfo timeline = timelines.get(agent_uuid);
+		TimeLineInfo timeline = ((Agent)agent).timeline;
+		if (is_debug) {
+			String msg = String.format("\tRelative time for %s is %f [round %d]\n", agent_uuid, timeline.getTime(), round);
+			info(msg);
+//			System.out.println(msg);
+		}
 		List<Class<? extends Action>> validActions = new ArrayList<Class<? extends Action>>();
 		if (!isFirstTurn)
 			validActions.add(Accept.class);
@@ -536,7 +580,6 @@ class NegLoader {
 		// System.out.format("Before actual agent chooses action");
 		genius.core.actions.Action action = null;
 		if (force_timeout) {
-
 			ExecutorWithTimeout executor = executors.get(agent_uuid);
 			try {
 				action = executor.execute(agent.toString(), new Callable<Action>() {
@@ -547,36 +590,90 @@ class NegLoader {
 				});
 			} catch (TimeoutException e) {
 				String msg = "Negotiating party " + agent_uuid + " timed out in chooseAction() method.";
+				if (logger != null) logger.info(msg);
 			} catch (ExecutionException e) {
 				String msg = "Negotiating party " + agent_uuid + " threw an exception in chooseAction() method.";
+				if (logger != null) logger.info(msg);
 			}
-
 		} else {
 			action = agent.chooseAction(validActions);
 		}
-		// System.out.format("After actual agent chooses action");
 		if (action == null) {
-			return "";
+			return (agent != null ? getAgentName(agent_uuid) : "NoAgent") + FIELD_SEP + "NoAction" + FIELD_SEP;
 		}
 		if (is_debug) {
 			String msg = String.format("\t%s -> %s\n", agent_uuid, action.toString());
-			System.out.print(msg);
+//			System.out.print(msg);
 			info(msg);
-			System.out.flush();
+//			System.out.flush();
 		} else {
 			printStatus();
 		}
-		if (timeline instanceof DiscreteTimeline)
-			((DiscreteTimeline) timeline).increment();
+		if (timeline != null && timeline instanceof DiscreteTimeline) {
+			if (round< 0)
+				((DiscreteTimeline) timeline).increment();
+			else
+				((DiscreteTimeline) timeline).setcRound(round);
+		}
 		return actionToString(agent_uuid, action);
 
 	}
 
-	private String chooseActionParty(String agent_uuid) {
+	public boolean run_negotiation(String p, String domainFile, String sProfiles, String sAgents, String outputFile) throws Exception {
+		List<String> agents = Arrays.asList(sAgents.split(";", -1));
+		List<String> profiles = Arrays.asList(sProfiles.split(";", -1));
+		return this._run_negotiation(p, domainFile, profiles, agents, outputFile);
+	}
+
+	private boolean _run_negotiation(String p, String domainFile, List<String> profiles, List<String> agents, String outputFile) throws Exception {
+		print_negotiation_info(outputFile, agents, profiles, domainFile, p);
+		if (p == null || domainFile==null){
+			return false;
+		}
+		if (profiles.size() != agents.size())
+			return false;
+
+		Global.logPreset = outputFile;
+		Protocol ns = null;
+
+		ProtocolRepItem protocol = new ProtocolRepItem(p, p, p);
+
+		DomainRepItem dom = new DomainRepItem(new URL(domainFile));
+
+		ProfileRepItem[] agentProfiles = new ProfileRepItem[profiles.size()];
+		for (int i = 0; i < profiles.size(); i++) {
+			agentProfiles[i] = new ProfileRepItem(new URL(profiles.get(i)), dom);
+			System.out.format("Profile: %s\n", agentProfiles[i].toString());
+			if (agentProfiles[i].getDomain() != agentProfiles[0].getDomain())
+				throw new IllegalArgumentException("Profiles for agent 0 and agent " + i
+						+ " do not have the same domain. Please correct your profiles");
+		}
+
+		AgentRepItem[] agentsrep = new AgentRepItem[agents.size()];
+		HashMap<AgentParameterVariable, AgentParamValue>[] agentParams = new HashMap[agentProfiles.length];
+		for (int i = 0; i < agents.size(); i++) {
+			agentsrep[i] = new AgentRepItem(agents.get(i), agents.get(i), agents.get(i));
+			agentParams[i] = new HashMap();
+			System.out.format("Agent Type: %s\n", agentsrep[i].toString());
+		}
+
+		ns = Global.createProtocolInstance(protocol, agentsrep, agentProfiles, agentParams);
+
+		ns.startSession();
+		ns.wait();
+		return true;
+	}
+
+	private String chooseActionParty(String agent_uuid, int round) {
 		// System.out.format("Entered choose action party:");
 		AbstractNegotiationParty agent = parties.get(agent_uuid);
 		boolean isFirstTurn = first_actions.get(agent_uuid);
-		TimeLineInfo timeline = timelines.get(agent_uuid);
+		TimeLineInfo timeline = agent.getTimeLine();
+		if (is_debug) {
+			String msg = String.format("\tRelative time for %s is %f\n", agent_uuid, timeline.getTime());
+			info(msg);
+//			System.out.println(msg);
+		}
 		List<Class<? extends Action>> validActions = new ArrayList<Class<? extends Action>>();
 		if (!isFirstTurn)
 			validActions.add(Accept.class);
@@ -585,7 +682,6 @@ class NegLoader {
 		// System.out.format("Before actual agent chooses action");
 		genius.core.actions.Action action = null;
 		if (force_timeout) {
-
 			ExecutorWithTimeout executor = executors.get(agent_uuid);
 			try {
 				action = executor.execute(agent.toString(), new Callable<Action>() {
@@ -596,31 +692,35 @@ class NegLoader {
 				});
 			} catch (TimeoutException e) {
 				String msg = "Negotiating party " + agent_uuid + " timed out in chooseAction() method.";
+				if (logger != null) logger.info(msg);
 			} catch (ExecutionException e) {
 				String msg = "Negotiating party " + agent_uuid + " threw an exception in chooseAction() method.";
+				if (logger != null) logger.info(msg);
 			}
-		}
-		// System.out.format("After actual agent chooses action");
-		if (action == null) {
-			return "";
 		} else {
 			action = agent.chooseAction(validActions);
+		}
+		if (action == null) {
+			return (agent != null ? getAgentName(agent_uuid) : "NoAgent") + FIELD_SEP + "NoAction" + FIELD_SEP;
 		}
 		// System.out.format("After actual agent chooses action");
 		if (is_debug) {
 			String msg = String.format("\t%s -> %s\n", agent_uuid, action.toString());
-			System.out.print(msg);
+//			System.out.print(msg);
 			info(msg);
-			System.out.flush();
+//			System.out.flush();
 		} else {
 			printStatus();
 		}
-		if (timeline instanceof DiscreteTimeline)
-			((DiscreteTimeline) timeline).increment();
+		if (timeline != null && timeline instanceof DiscreteTimeline)
+			if (round< 0)
+				((DiscreteTimeline) timeline).increment();
+			else
+				((DiscreteTimeline) timeline).setcRound(round);
 		return actionToString(agent_uuid, action);
 	}
 
-	private Boolean receiveMesasgeAgent(String agent_uuid, String from_id, String typeOfAction, String bid_str) {
+	private Boolean receiveMesasgeAgent(String agent_uuid, String from_id, String typeOfAction, String bid_str, int round) {
 		AgentAdapter agent = agents.get(agent_uuid);
 		boolean isFirstTurn = first_actions.get(agent_uuid);
 		if (isFirstTurn)
@@ -632,12 +732,20 @@ class NegLoader {
 		} else {
 			printStatus();
 		}
+		TimeLineInfo timeline = ((Agent) agent).timeline;
+		if (is_debug) {
+			String msg = String.format("\tRelative time for %s (receive) is %f\n", agent_uuid, timeline.getTime());
+			info(msg);
+		}
+		if (timeline != null && timeline instanceof DiscreteTimeline) {
+			if (round >= 0)
+				((DiscreteTimeline) timeline).setcRound(round);
+		}
 		final Action act = typeOfAction.contains("Offer") ? new Offer(agentID, bid)
 				: typeOfAction.contains("Accept") ? new Accept(agentID, bid)
-				: typeOfAction.contains("EndNegotiation") ? new EndNegotiation(agentID) : null;
+						: typeOfAction.contains("EndNegotiation") ? new EndNegotiation(agentID) : null;
 		// agent.receiveMessage(agentID, act);
 		if (force_timeout) {
-
 			ExecutorWithTimeout executor = executors.get(agent_uuid);
 			try {
 				executor.execute(agent.toString(), new Callable<AgentID>() {
@@ -649,20 +757,21 @@ class NegLoader {
 				});
 			} catch (TimeoutException e) {
 				String msg = "Negotiating party " + agent_uuid + " timed out in receiveMessage() method.";
+				if (logger != null) logger.info(msg);
 			} catch (ExecutionException e) {
 				String msg = "Negotiating party " + agent_uuid + " threw an exception in receiveMessage() method.";
+				if (logger != null) logger.info(msg);
 			}
 		} else {
 			agent.receiveMessage(agentID, act);
 		}
 		if (is_debug) {
-			// System.out.format("agent replied\n");
 			System.out.flush();
 		}
 		return true;
 	}
 
-	private Boolean receiveMessageParty(String agent_uuid, String from_id, String typeOfAction, String bid_str) {
+	private Boolean receiveMessageParty(String agent_uuid, String from_id, String typeOfAction, String bid_str, int round) {
 		AbstractNegotiationParty agent = parties.get(agent_uuid);
 		boolean isFirstTurn = first_actions.get(agent_uuid);
 		if (isFirstTurn)
@@ -674,11 +783,19 @@ class NegLoader {
 		} else {
 			printStatus();
 		}
+		TimeLineInfo timeline = agent.getTimeLine();
+		if (is_debug) {
+			String msg = String.format("\tRelative time for %s (receive) is %f [round %d]\n", agent_uuid, timeline.getTime(), round);
+			info(msg);
+		}
+		if (timeline != null && timeline instanceof DiscreteTimeline) {
+			if (round >= 0)
+				((DiscreteTimeline) timeline).setcRound(round);
+		}
 		final Action act = typeOfAction.contains("Offer") ? new Offer(agentID, bid)
 				: typeOfAction.contains("Accept") ? new Accept(agentID, bid)
-				: typeOfAction.contains("EndNegotiation") ? new EndNegotiation(agentID) : null;
+						: typeOfAction.contains("EndNegotiation") ? new EndNegotiation(agentID) : null;
 		if (force_timeout) {
-
 			ExecutorWithTimeout executor = executors.get(agent_uuid);
 			try {
 				executor.execute(agent.toString(), new Callable<AgentID>() {
@@ -690,17 +807,18 @@ class NegLoader {
 				});
 			} catch (TimeoutException e) {
 				String msg = "Negotiating party " + agent_uuid + " timed out in receiveMessage() method.";
+				if (logger != null) logger.info(msg);
 			} catch (ExecutionException e) {
 				String msg = "Negotiating party " + agent_uuid + " threw an exception in receiveMessage() method.";
+				if (logger != null) logger.info(msg);
 			}
 		} else {
 			agent.receiveMessage(agentID, act);
 		}
-		// agent.receiveMessage(agentID, act);
-		if (is_debug) {
-			// System.out.format("agent replied\n");
-			System.out.flush();
-		}
+//		if (is_debug) {
+//			// System.out.format("agent replied\n");
+////			System.out.flush();
+//		}
 		return true;
 	}
 
@@ -721,7 +839,7 @@ class NegLoader {
 	}
 
 	private NegotiationInfo createNegotiationInfo(String domain_file_name, String utility_file_name, boolean real_time,
-												  int max_time, long seed, String agent_uuid, long max_time_per_agent) {
+			int max_time, long seed, String agent_uuid, long max_time_per_agent) {
 		try {
 			DomainImpl domain = new DomainImpl(domain_file_name);
 			AdditiveUtilitySpace utilSpace = new AdditiveUtilitySpace(domain, utility_file_name);
@@ -751,7 +869,7 @@ class NegLoader {
 			ids.put(agent_uuid, agentID);
 			util_spaces.put(agent_uuid, utilSpace);
 			domains.put(agent_uuid, domain);
-			timelines.put(agent_uuid, timeline);
+			timelines.put(agent_uuid, info.getTimeline());
 			first_actions.put(agent_uuid, true);
 			if (force_any_timeout)
 				executors.put(agent_uuid, new ExecutorWithTimeout(timeout));
@@ -770,11 +888,16 @@ class NegLoader {
 		}
 		return null;
 	}
+
 	private String getAgentName(String agent_uuid) {
-		if (this.is_party.get(agent_uuid))
-			return parties.get(agent_uuid).getDescription();
-		else
-			return agents.get(agent_uuid).getDescription();
+	    try {
+			if (this.is_party.get(agent_uuid))
+				return parties.get(agent_uuid).getDescription();
+			else
+				return agents.get(agent_uuid).getDescription();
+		} catch(Exception e){
+	    	return "UNKNOWN";
+		}
 	}
 
 	private String actionToString(String agent_uuid, Action action) {
@@ -783,6 +906,12 @@ class NegLoader {
 		Bid bid = null;
 		if (action instanceof Offer) {
 			bid = ((Offer) action).getBid();
+			if (bid == null) {
+				// Here we assume that offering None is handled the same way
+				// it is done in negmas. It may lead to ending the negotiation
+				// or just a new offer
+				return id + FIELD_SEP + "NullOffer" + FIELD_SEP;
+			}
 			List<Issue> issues = bid.getIssues();
 			HashMap<Integer, Value> vals = bid.getValues();
 			HashMap<String, String> vals_str = new HashMap<String, String>();
@@ -805,20 +934,20 @@ class NegLoader {
 
 	private Bid strToBid(String agent_uuid, String bid_str) {
 		AbstractUtilitySpace utilSpace = util_spaces.get(agent_uuid);
-		ArrayList<Issue> issues = issues_all.get(agent_uuid);
+//		ArrayList<Issue> issues = issues_all.get(agent_uuid);
 		// Bid bid = new Bid(utilSpace.getDomain());//.getRandomBid(new Random());
 		if (bid_str == null) {
 			String msg = String.format("Received null bid ID %s", agent_uuid);
-			System.out.print(msg);
+//			System.out.print(msg);
 			info(msg);
-			System.out.flush();
+//			System.out.flush();
 			return null;
 		}
 		if (bid_str.equals("")) {
 			String msg = String.format("Received empty bid ID %s", agent_uuid);
-			System.out.print(msg);
+//			System.out.print(msg);
 			info(msg);
-			System.out.flush();
+//			System.out.flush();
 			return null;
 		}
 		String[] bid_strs = bid_str.split(ENTRY_SEP);
@@ -830,7 +959,14 @@ class NegLoader {
 			vals.put(string2issues.get(agent_uuid).get(issue_name).getNumber(),
 					string2values.get(agent_uuid).get(issue_name).get(val));
 		}
-		return new Bid(utilSpace.getDomain(), vals);
+		Bid bid = null;
+		try {
+			bid = new Bid(utilSpace.getDomain(), vals);
+		}catch(Exception e){
+			bid = null;
+			warning(e.toString());
+		}
+		return bid;
 	}
 
 	private void printStatus() {
@@ -838,34 +974,41 @@ class NegLoader {
 				n_active_agents, this.ids.size(), n_total_offers, n_total_responses);
 		System.out.flush();
 	}
-	private void info(String s){
-		if(logging) logger.info(s);
+
+	private void info(String s) {
+		if (logging)
+			logger.info(s);
 	}
-	private void warning(String s){
-		if(logging) logger.warning(s);
+
+	private void warning(String s) {
+		if (logging)
+			logger.warning(s);
 	}
-	private void error(String s){
-		if(logging) logger.log(Level.SEVERE, s);
+
+	private void error(String s) {
+		if (logging)
+			logger.log(Level.SEVERE, s);
 	}
+
 	/// ----------------------
 	/// Py4J server Management
 	/// ----------------------
-	public void setPy4jServer(GatewayServer server){
+	public void setPy4jServer(GatewayServer server) {
 		info(String.format("Py4j Server is set"));
 		this.server = server;
 	}
 
-	public void startPy4jServer(int port){
+	public void startPy4jServer(int port) {
 		info(String.format("Starting Py4j Server at port %d", port));
 		server = new GatewayServer(this, port);
 		try {
 			server.start();
-		}catch(Py4JNetworkException e){
+		} catch (Py4JNetworkException e) {
 			error(String.format("Failed to start a bridge at port %d: %s", port, e.toString()));
 			System.exit(-1);
 		}
 		int listening_port = server.getListeningPort();
-		String msg = String.format("Gateway v0.08 to python started at port %d listening to port %d [%s: %d]\n", port,
+		String msg = String.format("Gateway v0.09 to python started at port %d listening to port %d [%s: %d]\n", port,
 				listening_port, force_timeout ? "forcing timeout" : "no  timeout", this.global_timeout);
 		System.out.print(msg);
 		info(msg);
@@ -874,7 +1017,6 @@ class NegLoader {
 	public void shutdownPy4jServer() {
 		server.shutdown();
 	}
-
 
 	public static void main(String[] args) {
 		int port = 25337;
@@ -886,11 +1028,36 @@ class NegLoader {
 		boolean force_timeout_end = false;
 		boolean logging = true;
 		String logFile = "genius-bridge-log.txt";
-		String s = String.format("Received options: ");
+		String s = String.format("received options: ");
+		boolean run_neg = false;
+		List<String> agents = new ArrayList<>();
+		List<String> profiles = new ArrayList<>();
+		String domainFile = null, protocol = null, outputFile = null;
 		for (int i = 0; i < args.length; i++) {
 			String opt = args[i];
 			s += String.format("%s ", opt);
-			if (opt.equals("--die-on-exit") || opt.equals("die-on-exit")) {
+			if (run_neg){
+			    if (opt.startsWith("-u") || opt.startsWith("--profile") || opt.startsWith("--ufun")){
+			    	profiles.add(String.format("file://%s", opt.split("=")[1]));
+				}
+				if (opt.startsWith("-a") || opt.startsWith("--agent") || opt.startsWith("-n") || opt.startsWith("--negotiator")){
+					agents.add(String.format("file://%s", opt.split("=")[1]));
+				}
+				if (opt.startsWith("-p") || opt.startsWith("--protocol") || opt.startsWith("--mechanism")){
+					protocol = opt.split("=")[1];
+				}
+				if (opt.startsWith("-d") || opt.startsWith("--domain") || opt.startsWith("--issues")){
+					domainFile = String.format("file://%s", opt.split("=")[1]);
+				}
+				if (opt.startsWith("-o") || opt.startsWith("--log") || opt.startsWith("--output")){
+					outputFile = String.format("file://%s", opt.split("=")[1]);
+				}
+				continue;
+			}
+			if (opt.equals("run")) {
+				run_neg = true;
+				s = "";
+			} else if (opt.equals("--die-on-exit") || opt.equals("die-on-exit")) {
 				dieOnBrokenPipe = true;
 			} else if (opt.equals("--debug") || opt.equals("debug")) {
 				is_debug = true;
@@ -908,7 +1075,7 @@ class NegLoader {
 				force_timeout_init = false;
 			} else if (opt.startsWith("--force-timeout-end") || opt.equals("force-timeout-end")) {
 				force_timeout_end = true;
-			} else if (opt.startsWith("--no-timeout") || opt.equals("no-timeout")) {
+			} else if (opt.startsWith("--no-timeout-end") || opt.equals("no-timeout-end")) {
 				force_timeout_end = false;
 			} else if (opt.startsWith("--no-logs") || opt.equals("no-logs")) {
 				logging = false;
@@ -917,6 +1084,20 @@ class NegLoader {
 			} else {
 				port = Integer.parseInt(opt);
 			}
+		}
+		if (run_neg) {
+			NegLoader n = new NegLoader();
+			boolean result = false;
+			try {
+				result = n._run_negotiation(protocol, domainFile, profiles, agents, outputFile);
+			} catch (Exception e) {
+				e.printStackTrace();
+			}
+			if (result)
+				System.out.println("Negotiation Succeeded");
+			else
+				System.out.println("Negotiation FAILED");
+			return;
 		}
 		if (!force_timeout) {
 			timeout = -1;
@@ -929,16 +1110,16 @@ class NegLoader {
 			SimpleFormatter formatter = new SimpleFormatter();
 			fh.setFormatter(formatter);
 			logger.setLevel(Level.INFO);
-			logger.info("Genius Bridge started");
+			logger.info("Genius Bridge STARTED");
 			logger.info(s);
 		} catch (IOException e) {
-			e.printStackTrace(); logging=false;
+			e.printStackTrace();
+			logging = false;
 		}
 		System.out.println(s);
 		System.out.flush();
-		NegLoader app = new NegLoader(
-				is_debug, force_timeout, force_timeout_init, force_timeout_end, timeout, logging, logger
-		);
+		NegLoader app = new NegLoader(is_debug, force_timeout, force_timeout_init, force_timeout_end, timeout, logging,
+				logger);
 		app.info("NegLoader object is constructed");
 		app.startPy4jServer(port);
 		logger.info(String.format("Py4j server is started at port %d", port));
@@ -954,6 +1135,17 @@ class NegLoader {
 			} catch (java.io.IOException e) {
 				System.exit(1);
 			}
+		}
+	}
+
+	private static void print_negotiation_info(String outputFile, List<String> agents, List<String> profiles, String domainFile, String protocol) {
+		System.out.format("Running negotiation of type %s\nDomain: %s\nLog: %s\nProfiles:\n", protocol, domainFile, outputFile);
+		for (String profile: profiles) {
+			System.out.format("\t%s\n", profile);
+		}
+		System.out.println("Agents:");
+		for (String agent: agents) {
+			System.out.format("\t%s\n", agent);
 		}
 	}
 }
