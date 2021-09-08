@@ -93,7 +93,6 @@ class MapUtil {
 }
 
 class NegLoader {
-	public boolean is_debug = false;
 	private long n_total_agents = 0;
 	private long n_total_negotiations = 0;
 	private long n_active_negotiations = 0;
@@ -128,18 +127,21 @@ class NegLoader {
 	private boolean force_timeout_end = false;
 	private Logger logger = null;
 	private boolean logging = true;
+	public boolean is_debug = false;
+	private boolean is_silent = false;
 
 	public class Serialize implements Serializable {
 	}
 
 	public NegLoader(){
-	    this(false, false, false, false, 0, false, null);
+	    this(false, false, false, false, 0, false, null, false);
 	}
 	public NegLoader(boolean is_debug, boolean force_timeout, boolean force_timeout_init, boolean force_timeout_end,
-			long timeout, boolean logging, Logger logger) {
+			long timeout, boolean logging, Logger logger,  boolean is_silent) {
 		this.logger = logger;
 		this.logging = logging;
 		this.is_debug = is_debug;
+		this.is_silent = is_silent;
 		this.force_timeout_init = force_timeout_init;
 		this.force_timeout_end = force_timeout_end;
 		if (timeout > 0)
@@ -168,7 +170,8 @@ class NegLoader {
 		info(String.format("Test is called with class-name %s", class_name));
 		ArrayList classes = new ArrayList();
 
-		System.out.println("Jar " + jarName);
+		if(!is_silent)
+			System.out.println("Jar " + jarName);
 		try {
 			JarInputStream jarFile = new JarInputStream(new FileInputStream(jarName));
 			JarEntry jarEntry;
@@ -185,7 +188,8 @@ class NegLoader {
 				}
 			}
 			Class<?> clazz = Class.forName(class_name);
-			System.out.println(clazz.toString());
+			if(!is_silent)
+				System.out.println(clazz.toString());
 			// Constructor<?> constructor = clazz.getConstructor(String.class,
 			// Integer.class);
 			AbstractNegotiationParty instance = (AbstractNegotiationParty) clazz.newInstance();
@@ -626,7 +630,8 @@ class NegLoader {
 	}
 
 	private boolean _run_negotiation(String p, String domainFile, List<String> profiles, List<String> agents, String outputFile) throws Exception {
-		print_negotiation_info(outputFile, agents, profiles, domainFile, p);
+	    if (!is_silent)
+			print_negotiation_info(outputFile, agents, profiles, domainFile, p);
 		if (p == null || domainFile==null){
 			return false;
 		}
@@ -643,7 +648,8 @@ class NegLoader {
 		ProfileRepItem[] agentProfiles = new ProfileRepItem[profiles.size()];
 		for (int i = 0; i < profiles.size(); i++) {
 			agentProfiles[i] = new ProfileRepItem(new URL(profiles.get(i)), dom);
-			System.out.format("Profile: %s\n", agentProfiles[i].toString());
+			if(!is_silent)
+				System.out.format("Profile: %s\n", agentProfiles[i].toString());
 			if (agentProfiles[i].getDomain() != agentProfiles[0].getDomain())
 				throw new IllegalArgumentException("Profiles for agent 0 and agent " + i
 						+ " do not have the same domain. Please correct your profiles");
@@ -654,7 +660,8 @@ class NegLoader {
 		for (int i = 0; i < agents.size(); i++) {
 			agentsrep[i] = new AgentRepItem(agents.get(i), agents.get(i), agents.get(i));
 			agentParams[i] = new HashMap();
-			System.out.format("Agent Type: %s\n", agentsrep[i].toString());
+			if(!is_silent)
+				System.out.format("Agent Type: %s\n", agentsrep[i].toString());
 		}
 
 		ns = Global.createProtocolInstance(protocol, agentsrep, agentProfiles, agentParams);
@@ -765,7 +772,7 @@ class NegLoader {
 		} else {
 			agent.receiveMessage(agentID, act);
 		}
-		if (is_debug) {
+		if (is_debug && ! is_silent) {
 			System.out.flush();
 		}
 		return true;
@@ -884,7 +891,8 @@ class NegLoader {
 			return info;
 		} catch (Exception e) {
 			// TODO: handle exception
-			System.out.println(e);
+			if(!is_silent)
+				System.out.println(e);
 		}
 		return null;
 	}
@@ -970,6 +978,8 @@ class NegLoader {
 	}
 
 	private void printStatus() {
+		if(is_silent)
+		    return;
 		System.out.format("\r%06d agents (%06d active) [%06d ids]: %09d received, %09d sent", n_total_agents,
 				n_active_agents, this.ids.size(), n_total_offers, n_total_responses);
 		System.out.flush();
@@ -1008,9 +1018,10 @@ class NegLoader {
 			System.exit(-1);
 		}
 		int listening_port = server.getListeningPort();
-		String msg = String.format("Gateway v0.09 to python started at port %d listening to port %d [%s: %d]\n", port,
+		String msg = String.format("Gateway v0.10 to python started at port %d listening to port %d [%s: %d]\n", port,
 				listening_port, force_timeout ? "forcing timeout" : "no  timeout", this.global_timeout);
-		System.out.print(msg);
+		if(!is_silent)
+			System.out.print(msg);
 		info(msg);
 	}
 
@@ -1022,6 +1033,7 @@ class NegLoader {
 		int port = 25337;
 		long timeout = 3 * 60;
 		boolean is_debug = false;
+		boolean is_silent = false;
 		boolean dieOnBrokenPipe = false;
 		boolean force_timeout = true;
 		boolean force_timeout_init = false;
@@ -1061,6 +1073,8 @@ class NegLoader {
 				dieOnBrokenPipe = true;
 			} else if (opt.equals("--debug") || opt.equals("debug")) {
 				is_debug = true;
+			} else if (opt.equals("--silent") || opt.equals("silent")) {
+				is_silent = true;
 			} else if (opt.startsWith("--timeout") || opt.equals("timeout")) {
 				timeout = Integer.parseInt(opt.split("=")[1]);
 			} else if (opt.startsWith("--logfile") || opt.equals("log-file")) {
@@ -1093,10 +1107,13 @@ class NegLoader {
 			} catch (Exception e) {
 				e.printStackTrace();
 			}
-			if (result)
-				System.out.println("Negotiation Succeeded");
-			else
-				System.out.println("Negotiation FAILED");
+			if (result) {
+				if (!is_silent)
+					System.out.println("Negotiation Succeeded");
+			} else {
+				if (!is_silent)
+					System.out.println("Negotiation FAILED");
+			}
 			return;
 		}
 		if (!force_timeout) {
@@ -1110,19 +1127,23 @@ class NegLoader {
 			SimpleFormatter formatter = new SimpleFormatter();
 			fh.setFormatter(formatter);
 			logger.setLevel(Level.INFO);
-			logger.info("Genius Bridge STARTED");
-			logger.info(s);
+			if (logging) {
+				logger.info("Genius Bridge STARTED");
+				logger.info(s);
+			}
 		} catch (IOException e) {
 			e.printStackTrace();
 			logging = false;
 		}
-		System.out.println(s);
-		System.out.flush();
+		if (!is_silent) {
+			System.out.println(s);
+			System.out.flush();
+		}
 		NegLoader app = new NegLoader(is_debug, force_timeout, force_timeout_init, force_timeout_end, timeout, logging,
-				logger);
+				logger, is_silent);
 		app.info("NegLoader object is constructed");
 		app.startPy4jServer(port);
-		logger.info(String.format("Py4j server is started at port %d", port));
+		app.info(String.format("Py4j server is started at port %d", port));
 		if (dieOnBrokenPipe) {
 			/*
 			 * Exit on EOF or broken pipe. This ensures that the server dies if its parent
