@@ -128,13 +128,13 @@ class NegLoader {
 	private Logger logger = null;
 	private boolean logging = true;
 	public boolean is_debug = false;
-	private boolean is_silent = false;
+	private boolean is_silent = true;
 
 	public class Serialize implements Serializable {
 	}
 
 	public NegLoader(){
-	    this(false, false, false, false, 0, false, null, false);
+	    this(false, false, false, false, 0, true, null, true);
 	}
 	public NegLoader(boolean is_debug, boolean force_timeout, boolean force_timeout_init, boolean force_timeout_end,
 			long timeout, boolean logging, Logger logger,  boolean is_silent) {
@@ -1018,7 +1018,7 @@ class NegLoader {
 			System.exit(-1);
 		}
 		int listening_port = server.getListeningPort();
-		String msg = String.format("Gateway v0.10 to python started at port %d listening to port %d [%s: %d]\n", port,
+		String msg = String.format("Gateway v0.11 to python started at port %d listening to port %d [%s: %d]\n", port,
 				listening_port, force_timeout ? "forcing timeout" : "no  timeout", this.global_timeout);
 		if(!is_silent)
 			System.out.print(msg);
@@ -1033,12 +1033,12 @@ class NegLoader {
 		int port = 25337;
 		long timeout = 3 * 60;
 		boolean is_debug = false;
-		boolean is_silent = false;
+		boolean is_silent = true;
 		boolean dieOnBrokenPipe = false;
 		boolean force_timeout = true;
 		boolean force_timeout_init = false;
 		boolean force_timeout_end = false;
-		boolean logging = true;
+		boolean logging = false;
 		String logFile = "genius-bridge-log.txt";
 		String s = String.format("received options: ");
 		boolean run_neg = false;
@@ -1073,8 +1073,12 @@ class NegLoader {
 				dieOnBrokenPipe = true;
 			} else if (opt.equals("--debug") || opt.equals("debug")) {
 				is_debug = true;
+				is_silent = false;
+				logging = true;
 			} else if (opt.equals("--silent") || opt.equals("silent")) {
 				is_silent = true;
+			} else if (opt.equals("--verbose") || opt.equals("verbose")) {
+				is_silent = false;
 			} else if (opt.startsWith("--timeout") || opt.equals("timeout")) {
 				timeout = Integer.parseInt(opt.split("=")[1]);
 			} else if (opt.startsWith("--logfile") || opt.equals("log-file")) {
@@ -1119,28 +1123,32 @@ class NegLoader {
 		if (!force_timeout) {
 			timeout = -1;
 		}
-		Logger logger = Logger.getLogger("com.yasserm.geniusbridge");
-		Handler fh = null;
-		try {
-			fh = new FileHandler(logFile);
-			logger.addHandler(fh);
-			SimpleFormatter formatter = new SimpleFormatter();
-			fh.setFormatter(formatter);
-			logger.setLevel(Level.INFO);
-			if (logging) {
-				logger.info("Genius Bridge STARTED");
-				logger.info(s);
+		Logger logger = null;
+		if (logging){
+			logger = Logger.getLogger("com.yasserm.geniusbridge");
+			Handler fh = null;
+			try {
+				fh = new FileHandler(logFile);
+				logger.addHandler(fh);
+				SimpleFormatter formatter = new SimpleFormatter();
+				fh.setFormatter(formatter);
+				logger.setLevel(Level.INFO);
+				if (logging) {
+					logger.info("Genius Bridge STARTED");
+					logger.info(s);
+				}
+			} catch (IOException e) {
+				e.printStackTrace();
+				logging = false;
+				logger = null;
 			}
-		} catch (IOException e) {
-			e.printStackTrace();
-			logging = false;
 		}
 		if (!is_silent) {
 			System.out.println(s);
 			System.out.flush();
 		}
 		NegLoader app = new NegLoader(is_debug, force_timeout, force_timeout_init, force_timeout_end, timeout, logging,
-				logger, is_silent);
+				logging? logger: null, is_silent);
 		app.info("NegLoader object is constructed");
 		app.startPy4jServer(port);
 		app.info(String.format("Py4j server is started at port %d", port));
