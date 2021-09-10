@@ -1,3 +1,20 @@
+/**
+ * A bridge that connects NegMAS to Genius.
+ *
+ * Notes:
+ * =====
+ * - A step in NegMAS == round in Genius
+ * - A negotiator in NegMAS == agent in Genius
+ * - Agents in Genius come in two varieties: older agents are based on the Agent class and newer ones on the NegotiationParty class.  We support both
+ * - An AgentAdapter adapts an Agent class to appear as a NegotiationParty class (to the best of my knowledge).
+ * - It seems that rounds start at 1 in Genius but steps start at 0 in NegMAS. For this reason, rounds/steps exchanged are adjusted down/up by one
+ *
+ * Unclear Ponints:
+ * ================
+ * - How to run a negotiation programatically in Genius?
+ * - How to run a single round of a negotiation programatically in Genius?
+ *
+ */
 package com.yasserm.negmasgeniusbridge;
 
 import genius.core.*;
@@ -8,6 +25,7 @@ import genius.core.issue.Value;
 import genius.core.issue.ValueDiscrete;
 import genius.core.parties.AbstractNegotiationParty;
 import genius.core.parties.NegotiationInfo;
+import genius.core.parties.NegotiationParty;
 import genius.core.persistent.DefaultPersistentDataContainer;
 import genius.core.persistent.PersistentDataType;
 import genius.core.protocol.Protocol;
@@ -27,6 +45,7 @@ import py4j.GatewayServer;
 import py4j.Py4JNetworkException;
 
 import java.io.*;
+import java.lang.reflect.InvocationTargetException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
@@ -74,13 +93,26 @@ class MapUtil {
      */
 }
 
+/**
+ * Representas a running Genius Agent
+ */
+class NegotiatorInfo {
+    public AgentID id;
+    public NegotiationParty agent;
+    public Boolean isParty;
+    public Boolean isStrict;
+    public Boolean isRealTimeLimit;
+    public AdditiveUtilitySpace utilitySpace;
+    public Boolean firstAction;
+}
+
 class NegLoader {
     final public boolean is_debug;
     final private HashMap<String, AbstractNegotiationParty> parties = new HashMap<>();
     final private HashMap<String, AgentAdapter> agents = new HashMap<>();
-    final private HashMap<String, Boolean> is_party = new HashMap<>();
+    final private HashMap<String, Boolean> isParty = new HashMap<>();
     final private HashMap<String, AgentID> ids = new HashMap<>();
-    final private HashMap<String, Boolean> is_strict = new HashMap<>();
+    final private HashMap<String, Boolean> isStrict = new HashMap<>();
     final private HashMap<String, Boolean> isRealTimeLimit = new HashMap<>();
     final private HashMap<String, AdditiveUtilitySpace> util_spaces = new HashMap<>();
     final private HashMap<String, Boolean> first_actions = new HashMap<>();
@@ -89,6 +121,10 @@ class NegLoader {
     final private String INTERNAL_SEP = "<<s=s>>";
     final private String ENTRY_SEP = "<<y,y>>";
     final private String FIELD_SEP = "<<sy>>";
+    final private String TIMEOUT = "__TIMEOUT__";
+    final private String OK = "__OK__";
+    final private String FAILED = "__FAILED__";
+    final private String NOACTION = "NoAction";
     final private boolean force_timeout;
     final private boolean force_any_timeout;
     final private boolean force_timeout_init;
@@ -323,7 +359,7 @@ class NegLoader {
      * @return version
      */
     private static String version() {
-        return "v0.15";
+        return "v0.16";
     }
 
     /// Python Hooks: Methods called from python (they all have python snake_case
@@ -357,7 +393,7 @@ class NegLoader {
             Class<?> clazz = Class.forName(class_name);
             if (!is_silent)
                 System.out.println(clazz.toString());
-            AbstractNegotiationParty instance = (AbstractNegotiationParty) clazz.newInstance();
+            AbstractNegotiationParty instance = (AbstractNegotiationParty) clazz.getDeclaredConstructor().newInstance();
             return instance.getDescription();
         } catch (Exception e) {
             e.printStackTrace();
@@ -369,20 +405,23 @@ class NegLoader {
      * Creates a new agent (negmas Negotaitor)
      *
      * @param class_name The class name of the negotiator to create
-     * @return If successful the UUID of the object created otherwise an empty string
+     * @return If successful the UUID of the object created otherwise an FAILED
+     * @throws InstantiationException
+     * @throws IllegalAccessException
+     * @throws ClassNotFoundException
+     * @throws NoSuchMethodException
      */
-    public String create_agent(String class_name) throws InstantiationException, IllegalAccessException, ClassNotFoundException {
+    public String create_agent(String class_name) throws InstantiationException, IllegalAccessException, ClassNotFoundException, InvocationTargetException, NoSuchMethodException {
         try {
             Class<?> clazz = Class.forName(class_name);
             String uuid = class_name + UUID.randomUUID().toString();
             if (AbstractNegotiationParty.class.isAssignableFrom(clazz)) {
-                AbstractNegotiationParty agent = (AbstractNegotiationParty) clazz.newInstance();
-                this.is_party.put(uuid, true);
+                AbstractNegotiationParty agent = (AbstractNegotiationParty) clazz.getDeclaredConstructor().newInstance();
+                this.isParty.put(uuid, true);
                 this.parties.put(uuid, agent);
-
             } else {
-                AgentAdapter agent = (AgentAdapter) clazz.newInstance();
-                this.is_party.put(uuid, false);
+                AgentAdapter agent = (AgentAdapter) clazz.getDeclaredConstructor().newInstance();
+                this.isParty.put(uuid, false);
                 this.agents.put(uuid, agent);
             }
             n_total_agents++;
@@ -406,10 +445,10 @@ class NegLoader {
      * @param agent_uuid Agent UUID
      * @return relative time [0-1] of the negotiation (works both for n_steps and time_limit limited negotiations)
      */
-    public double get_time(String agent_uuid) throws InvalidObjectException {
+    public double get_relative_time(String agent_uuid) throws InvalidObjectException {
         Boolean isparty;
         try {
-            isparty = is_party.get(agent_uuid);
+            isparty = isParty.get(agent_uuid);
         } catch (Exception e) {
             throw new InvalidObjectException(String.format("%s agent was not found. Cannot get_time", agent_uuid));
         }
@@ -440,13 +479,14 @@ class NegLoader {
      * @param utility_file_name Preferences file name (ufun)
      * @param agent_timeout Time out for this agent
      * @param strict If given the bridge will just pass any exceptions to negmas (as well as failure of agents to choose an action)
-     * @throws TimeoutException
+     * @return OK if success, FAILED if failure, TIMEOUT if timedout
      * @throws ExecutionException
+     * @throws InvalidObjectException
      */
-    public void on_negotiation_start(String agent_uuid, int n_agents, long n_steps, long time_limit, boolean real_time,
-                                     String domain_file_name, String utility_file_name, long agent_timeout, boolean strict) throws TimeoutException, ExecutionException, InvalidObjectException {
+    public String on_negotiation_start(String agent_uuid, int n_agents, long n_steps, long time_limit, boolean real_time,
+                                       String domain_file_name, String utility_file_name, long agent_timeout, boolean strict) throws ExecutionException, InvalidObjectException {
         this.n_agents = n_agents;
-        Boolean isparty = is_party.get(agent_uuid);
+        Boolean isparty = isParty.get(agent_uuid);
         if (isparty == null) {
             if (is_debug) {
                 String msg = String.format("Agent %s does not exist", agent_uuid);
@@ -465,7 +505,7 @@ class NegLoader {
             if (info == null) {
                 if (strict)
                     throw new InvalidObjectException(String.format("Cannot create NegotiationInfo for agent %s. Cannot start negotiation ", agent_uuid));
-                return;
+                return FAILED;
             }
             if (force_timeout_init) {
                 ExecutorWithTimeout executor = executors.get(agent_uuid);
@@ -477,11 +517,13 @@ class NegLoader {
                 } catch (TimeoutException e) {
                     String msg = "Negotiating party " + agent_uuid + " timed out in init() method.";
                     if (logger != null) logger.info(msg);
-                    if (strict) throw e;
+                    return TIMEOUT;
+//                    if (strict) throw e;
                 } catch (ExecutionException e) {
                     String msg = "Negotiating party " + agent_uuid + " threw an exception in init() method.";
                     if (logger != null) logger.info(msg);
                     if (strict) throw e;
+                    return FAILED;
                 }
             } else {
                 agent.init(info);
@@ -493,7 +535,7 @@ class NegLoader {
             if (info == null) {
                 if (strict)
                     throw new InvalidObjectException(String.format("Cannot create NegotiationInfo for agent %s. Cannot start negotiation ", agent_uuid));
-                return;
+                return FAILED;
             }
             if (force_timeout_init) {
                 ExecutorWithTimeout executor = executors.get(agent_uuid);
@@ -501,16 +543,17 @@ class NegLoader {
                     executor.execute(agent_uuid, () -> {
                         agent.init(info);
                         return agent;
-
                     });
                 } catch (TimeoutException e) {
                     String msg = "Negotiating party " + agent_uuid + " timed out in init() method.";
                     if (logger != null) logger.info(msg);
-                    if (strict) throw e;
+                    return TIMEOUT;
+//                    if (strict) throw e;
                 } catch (ExecutionException e) {
                     String msg = "Negotiating party " + agent_uuid + " threw an exception in init() method.";
                     if (logger != null) logger.info(msg);
                     if (strict) throw e;
+                    return FAILED;
                 }
             } else {
                 agent.init(info);
@@ -519,10 +562,11 @@ class NegLoader {
         n_total_negotiations++;
         n_active_negotiations++;
         if (is_debug) {
-            info(String.format("Agent %s: time limit %d, step limit %d\n", getAgentName(agent_uuid), time_limit, n_steps));
+            info(String.format("Agent %s: time limit %d, step limit %d\n", getName(agent_uuid), time_limit, n_steps));
         } else {
             printStatus();
         }
+        return OK;
     }
 
     /**
@@ -538,7 +582,7 @@ class NegLoader {
     public String choose_action(String agent_uuid, int round) throws TimeoutException, ExecutionException, InvalidObjectException {
         round++;
         n_total_responses++;
-        Boolean isparty = is_party.get(agent_uuid);
+        Boolean isparty = isParty.get(agent_uuid);
         if (isparty == null) {
             if (is_debug) {
                 String msg = String.format("Agent %s does not exist", agent_uuid);
@@ -559,15 +603,15 @@ class NegLoader {
      * @param typeOfAction The type of action chosen by the sender
      * @param bid_str      A string serialization of the bid by the sender
      * @param round        round number (negmas step)
-     * @return Success/failure
+     * @return OK if success, FAILED if failure, TIMEOUT if timedout
      * @throws TimeoutException
      * @throws ExecutionException
      */
-    public Boolean receive_message(String agent_uuid, String from_id, String typeOfAction, String bid_str, int round) throws TimeoutException, ExecutionException, InvalidObjectException {
+    public String receive_message(String agent_uuid, String from_id, String typeOfAction, String bid_str, int round) throws TimeoutException, ExecutionException, InvalidObjectException {
+        // Rounds in Genius start at 1 not 0!!!!
         round++;
         n_total_offers++;
-        boolean result;
-        Boolean isparty = is_party.get(agent_uuid);
+        Boolean isparty = isParty.get(agent_uuid);
         if (isparty == null) {
             if (is_debug) {
                 info(String.format("Agent %s does not exist", agent_uuid));
@@ -575,10 +619,8 @@ class NegLoader {
             throw new InvalidObjectException(String.format("%s agent was not found. Cannot receive message (round %d)", agent_uuid, round));
         }
         if (isparty)
-            result = receiveMessageParty(agent_uuid, from_id, typeOfAction, bid_str, round);
-        else
-            result = receiveMessageAgent(agent_uuid, from_id, typeOfAction, bid_str, round);
-        return result;
+            return receiveMessageParty(agent_uuid, from_id, typeOfAction, bid_str, round);
+        return receiveMessageAgent(agent_uuid, from_id, typeOfAction, bid_str, round);
     }
 
     /**
@@ -586,8 +628,9 @@ class NegLoader {
      *
      * @param agent_uuid Agent UUID
      * @param agent_num  number of agents in the negotiation
+     * @return OK if success, FAILED if failure
      */
-    public void inform_message(String agent_uuid, int agent_num) throws InvalidObjectException {
+    public String inform_message(String agent_uuid, int agent_num) throws InvalidObjectException {
         if (ids.get(agent_uuid) == null) {
             if (is_debug) {
                 info(String.format("Agent %s does not exist", agent_uuid));
@@ -596,6 +639,7 @@ class NegLoader {
         }
         Inform inform = new Inform(ids.get(agent_uuid), "NumberOfAgents", agent_num);
         parties.get(agent_uuid).receiveMessage(ids.get(agent_uuid), inform);
+        return OK;
     }
 
     /**
@@ -603,29 +647,31 @@ class NegLoader {
      *
      * @param agent_uuid Agent UUID
      */
-    public void inform_message(String agent_uuid) {
+    public String inform_message(String agent_uuid) throws InvalidObjectException {
         if (ids.get(agent_uuid) == null) {
             if (is_debug) {
                 String msg = String.format("Agent %s does not exist", agent_uuid);
                 info(msg);
             }
-            return;
+            throw new InvalidObjectException(String.format("%s agent was not found. Cannot inform message ", agent_uuid));
         }
         Inform inform = new Inform(ids.get(agent_uuid), "NumberOfAgents", this.n_agents);
         parties.get(agent_uuid).receiveMessage(ids.get(agent_uuid), inform);
+        return OK;
     }
 
     /**
      * Called by negmas when the negotiation is ended to inform the Genius agent (does not cleanup)
+     *
      * @param agent_uuid Agent UUID
-     * @param bid_str the agreement if any
+     * @param bid_str    the agreement if any
      * @throws TimeoutException
      * @throws ExecutionException
      */
-    public void on_negotiation_end(String agent_uuid, String bid_str) throws TimeoutException, ExecutionException, InvalidObjectException {
+    public String on_negotiation_end(String agent_uuid, String bid_str) throws TimeoutException, ExecutionException, InvalidObjectException {
         Bid bid = bid_str == null ? null : strToBid(agent_uuid, bid_str);
-        Boolean isparty = is_party.get(agent_uuid);
-        boolean strict = is_strict.get(agent_uuid);
+        Boolean isparty = isParty.get(agent_uuid);
+        boolean strict = isStrict.get(agent_uuid);
         boolean forcedTimeout = isRealTimeLimit.get(agent_uuid);
         if (isparty == null) {
             if (is_debug) {
@@ -642,12 +688,14 @@ class NegLoader {
                 } catch (TimeoutException e) {
                     String msg = "Negotiating party " + agent_uuid + " timed out in negotiationEnded() method.";
                     if (logger != null) logger.info(msg);
-                    if (strict) throw e;
+//                    if (strict) throw e;
+                    return TIMEOUT;
                 } catch (ExecutionException e) {
                     String msg = "Negotiating party " + agent_uuid
                             + " threw an exception in negotiationEnded() method.";
                     if (logger != null) logger.info(msg);
                     if (strict) throw e;
+                    return FAILED;
                 }
             } else {
                 agent.negotiationEnded(bid);
@@ -663,26 +711,30 @@ class NegLoader {
                 } catch (TimeoutException e) {
                     String msg = "Negotiating party " + agent_uuid + " timed out in negotiationEnded() method.";
                     if (logger != null) logger.info(msg);
-                    if (strict) throw e;
+//                    if (strict) throw e;
+                    return TIMEOUT;
                 } catch (ExecutionException e) {
                     String msg = "Negotiating party " + agent_uuid
                             + " threw an exception in negotiationEnded() method.";
                     if (logger != null) logger.info(msg);
                     if (strict) throw e;
+                    return FAILED;
                 }
             } else {
                 agent.negotiationEnded(bid);
             }
         }
+        return OK;
     }
 
     /**
      * Destroys an agent (should only be called after the negotiation is ended)
+     *
      * @param agent_uuid Agent UUID
-     * @return Always an empty string
+     * @return OK if success, FAILED if failure, TIMEOUT if timedout
      */
     public String destroy_agent(String agent_uuid) {
-        this.is_strict.remove(agent_uuid);
+        this.isStrict.remove(agent_uuid);
         this.isRealTimeLimit.remove(agent_uuid);
         this.ids.remove(agent_uuid);
         this.util_spaces.remove(agent_uuid);
@@ -693,7 +745,7 @@ class NegLoader {
         this.string2issues.remove(agent_uuid);
         this.parties.remove(agent_uuid);
         this.agents.remove(agent_uuid);
-        this.is_party.remove(agent_uuid);
+        this.isParty.remove(agent_uuid);
         n_active_agents--;
         if (is_debug) {
             String msg = String.format("Agent %s destroyed\n", agent_uuid);
@@ -702,14 +754,14 @@ class NegLoader {
             printStatus();
         }
         System.gc();
-        return "";
+        return OK;
     }
 
     /**
      * Clears all agents and data-structures
      */
     public void clean() {
-        this.is_strict.clear();
+        this.isStrict.clear();
         this.isRealTimeLimit.clear();
         this.ids.clear();
         this.util_spaces.clear();
@@ -720,7 +772,7 @@ class NegLoader {
         this.string2issues.clear();
         this.parties.clear();
         this.agents.clear();
-        this.is_party.clear();
+        this.isParty.clear();
         n_active_agents = this.ids.size();
         System.gc();
         if (is_debug) {
@@ -731,6 +783,10 @@ class NegLoader {
         } else {
             printStatus();
         }
+    }
+
+    public String get_name(String agent_uuid) throws InvalidObjectException {
+        return getName(agent_uuid);
     }
 
     /**
@@ -780,10 +836,11 @@ class NegLoader {
 
     /**
      * Runs a negotiation inside Genius
-     * @param p The protocol
+     *
+     * @param p          The protocol
      * @param domainFile Domain xml file
-     * @param sProfiles Semicolon separated profile file paths
-     * @param sAgents Semiconon separated agent class names
+     * @param sProfiles  Semicolon separated profile file paths
+     * @param sAgents    Semiconon separated agent class names
      * @param outputFile File used for logging
      * @return succcess/failure
      * @throws Exception
@@ -796,10 +853,11 @@ class NegLoader {
 
     /**
      * Runs a negotiation inside Genius
-     * @param p The protocol
+     *
+     * @param p          The protocol
      * @param domainFile Domain xml file
-     * @param profiles list of profile files
-     * @param agents list of agent class names
+     * @param profiles   list of profile files
+     * @param agents     list of agent class names
      * @param outputFile File used for logging
      * @return succcess/failure
      * @throws Exception
@@ -853,8 +911,9 @@ class NegLoader {
 
     /**
      * Chooses an action by the agent (for old agents based on the Agent class)
+     *
      * @param agent_uuid Agent UUID (must already been created by create_agent and initalized)
-     * @param round round number (negmas step)
+     * @param round      round number (negmas step)
      * @return A string serialization of the action chosen (including counter offer if any)
      * @throws ExecutionException
      * @throws TimeoutException
@@ -863,7 +922,7 @@ class NegLoader {
     private String chooseActionAgent(String agent_uuid, int round) throws ExecutionException, TimeoutException, InvalidObjectException {
         AgentAdapter agent = agents.get(agent_uuid);
         Boolean isFirstTurn = first_actions.get(agent_uuid);
-        boolean strict = is_strict.get(agent_uuid);
+        boolean strict = isStrict.get(agent_uuid);
         boolean forcedTimeout = isRealTimeLimit.get(agent_uuid);
         TimeLineInfo timeline = ((Agent) agent).timeline;
         if (is_debug) {
@@ -885,11 +944,13 @@ class NegLoader {
             } catch (TimeoutException e) {
                 String msg = "Negotiating party " + agent_uuid + " timed out in chooseAction() method.";
                 if (logger != null) logger.info(msg);
-                if (strict) throw e;
+//                if (strict) throw e;
+                return getName(agent_uuid) + FIELD_SEP + TIMEOUT + FIELD_SEP;
             } catch (ExecutionException e) {
                 String msg = "Negotiating party " + agent_uuid + " threw an exception in chooseAction() method.";
                 if (logger != null) logger.info(msg);
                 if (strict) throw e;
+                return getName(agent_uuid) + FIELD_SEP + FAILED + FIELD_SEP;
             }
         } else {
             action = agent.chooseAction(validActions);
@@ -900,7 +961,7 @@ class NegLoader {
             }
             if (strict)
                 throw new InvalidObjectException(String.format("Agent %s responded to chooseAction with null", agent_uuid));
-            return getAgentName(agent_uuid) + FIELD_SEP + "NoAction" + FIELD_SEP;
+            return getName(agent_uuid) + FIELD_SEP + NOACTION + FIELD_SEP;
         }
         if (is_debug) {
             info(String.format("\t%s -> %s\n", agent_uuid, action.toString()));
@@ -919,8 +980,9 @@ class NegLoader {
 
     /**
      * Chooses an action by the agent (for new agents based on the NegotiationParty class)
+     *
      * @param agent_uuid Agent UUID (must already been created by create_agent and initalized)
-     * @param round round number (negmas step)
+     * @param round      round number (negmas step)
      * @return A string serialization of the action chosen (including counter offer if any)
      * @throws ExecutionException
      * @throws TimeoutException
@@ -929,7 +991,7 @@ class NegLoader {
     private String chooseActionParty(String agent_uuid, int round) throws TimeoutException, ExecutionException, InvalidObjectException {
         AbstractNegotiationParty agent = parties.get(agent_uuid);
         Boolean isFirstTurn = first_actions.get(agent_uuid);
-        boolean strict = is_strict.get(agent_uuid);
+        boolean strict = isStrict.get(agent_uuid);
         boolean forcedTimeout = isRealTimeLimit.get(agent_uuid);
         TimeLineInfo timeline = agent.getTimeLine();
         if (is_debug) {
@@ -953,11 +1015,13 @@ class NegLoader {
             } catch (TimeoutException e) {
                 String msg = "Negotiating party " + agent_uuid + " timed out in chooseAction() method.";
                 if (logger != null) logger.info(msg);
-                if (strict) throw e;
+//                if (strict) throw e;
+                return getName(agent_uuid) + FIELD_SEP + TIMEOUT + FIELD_SEP;
             } catch (ExecutionException e) {
                 String msg = "Negotiating party " + agent_uuid + " threw an exception in chooseAction() method.";
                 if (logger != null) logger.info(msg);
                 if (strict) throw e;
+                return getName(agent_uuid) + FIELD_SEP + FAILED + FIELD_SEP;
             }
         } else {
             action = agent.chooseAction(validActions);
@@ -968,7 +1032,7 @@ class NegLoader {
             }
             if (strict)
                 throw new InvalidObjectException(String.format("Agent %s responded to chooseAction with null", agent_uuid));
-            return getAgentName(agent_uuid) + FIELD_SEP + "NoAction" + FIELD_SEP;
+            return getName(agent_uuid) + FIELD_SEP + NOACTION + FIELD_SEP;
         }
         if (is_debug) {
             info(String.format("\t%s -> %s\n", agent_uuid, action.toString()));
@@ -985,22 +1049,23 @@ class NegLoader {
 
     /**
      * Sends a message to an old agent based on the Agent class
-     * @param agent_uuid Agent UUID (must be created using create_agent and initalized)
-     * @param from_id sender id
+     *
+     * @param agent_uuid   Agent UUID (must be created using create_agent and initalized)
+     * @param from_id      sender id
      * @param typeOfAction Sender's action
-     * @param bid_str string serialization of the sender's bid
-     * @param round round number (negmas step)
-     * @return success/failure
+     * @param bid_str      string serialization of the sender's bid
+     * @param round        round number (negmas step)
+     * @return OK if success, FAILED if failure, TIMEOUT if timedout
      * @throws ExecutionException
      * @throws TimeoutException
      * @throws InvalidObjectException
      */
-    private Boolean receiveMessageAgent(String agent_uuid, String from_id, String typeOfAction, String bid_str, int round) throws ExecutionException, TimeoutException, InvalidObjectException {
+    private String receiveMessageAgent(String agent_uuid, String from_id, String typeOfAction, String bid_str, int round) throws ExecutionException, TimeoutException, InvalidObjectException {
         AgentAdapter agent = agents.get(agent_uuid);
         Boolean isFirstTurn = first_actions.get(agent_uuid);
-        boolean strict = is_strict.get(agent_uuid);
+        boolean strict = isStrict.get(agent_uuid);
         boolean forcedTimeout = isRealTimeLimit.get(agent_uuid);
-        if (isFirstTurn == null){
+        if (isFirstTurn == null) {
             isFirstTurn = true;
         }
         if (isFirstTurn)
@@ -1015,9 +1080,8 @@ class NegLoader {
             String msg = String.format("\tRelative time for %s (receive) is %f\n", agent_uuid, timeline.getTime());
             info(msg);
         }
-        if (timeline instanceof DiscreteTimeline) {
-            if (round >= 0)
-                ((DiscreteTimeline) timeline).setcRound(round);
+        if (timeline instanceof DiscreteTimeline && round >= 0) {
+            ((DiscreteTimeline) timeline).setcRound(round);
         }
         final Action act = typeOfAction.contains("Offer") ? new Offer(agentID, bid)
                 : typeOfAction.contains("Accept") ? new Accept(agentID, bid)
@@ -1033,11 +1097,13 @@ class NegLoader {
             } catch (TimeoutException e) {
                 String msg = "Negotiating party " + agent_uuid + " timed out in receiveMessage() method.";
                 if (logger != null) logger.info(msg);
-                if (strict) throw e;
+//                if (strict) throw e;
+                return TIMEOUT;
             } catch (ExecutionException e) {
                 String msg = "Negotiating party " + agent_uuid + " threw an exception in receiveMessage() method.";
                 if (logger != null) logger.info(msg);
                 if (strict) throw e;
+                return FAILED;
             }
         } else {
             agent.receiveMessage(agentID, act);
@@ -1045,27 +1111,28 @@ class NegLoader {
         if (is_debug && !is_silent) {
             System.out.flush();
         }
-        return true;
+        return OK;
     }
 
     /**
      * Sends a message to an new agent based on the NegotiationParty class
-     * @param agent_uuid Agent UUID (must be created using create_agent and intialized)
-     * @param from_id sender id
+     *
+     * @param agent_uuid   Agent UUID (must be created using create_agent and intialized)
+     * @param from_id      sender id
      * @param typeOfAction Sender's action
-     * @param bid_str string serialization of the sender's bid
-     * @param round round number (negmas step)
-     * @return success/failure
+     * @param bid_str      string serialization of the sender's bid
+     * @param round        round number (negmas step)
+     * @return OK if success, FAILED if failure, TIMEOUT if timedout
      * @throws ExecutionException
      * @throws TimeoutException
      * @throws InvalidObjectException
      */
-    private Boolean receiveMessageParty(String agent_uuid, String from_id, String typeOfAction, String bid_str, int round) throws TimeoutException, ExecutionException, InvalidObjectException {
+    private String receiveMessageParty(String agent_uuid, String from_id, String typeOfAction, String bid_str, int round) throws TimeoutException, ExecutionException, InvalidObjectException {
         AbstractNegotiationParty agent = parties.get(agent_uuid);
         Boolean isFirstTurn = first_actions.get(agent_uuid);
-        boolean strict = is_strict.get(agent_uuid);
+        boolean strict = isStrict.get(agent_uuid);
         boolean forcedTimeout = isRealTimeLimit.get(agent_uuid);
-        if (isFirstTurn == null){
+        if (isFirstTurn == null) {
             isFirstTurn = true;
         }
         if (isFirstTurn)
@@ -1096,16 +1163,18 @@ class NegLoader {
             } catch (TimeoutException e) {
                 String msg = "Negotiating party " + agent_uuid + " timed out in receiveMessage() method.";
                 if (logger != null) logger.info(msg);
-                if (strict) throw e;
+//                if (strict) throw e;
+                return TIMEOUT;
             } catch (ExecutionException e) {
                 String msg = "Negotiating party " + agent_uuid + " threw an exception in receiveMessage() method.";
                 if (logger != null) logger.info(msg);
                 if (strict) throw e;
+                return FAILED;
             }
         } else {
             agent.receiveMessage(agentID, act);
         }
-        return true;
+        return OK;
     }
 
     /// -------
@@ -1114,6 +1183,7 @@ class NegLoader {
 
     /**
      * Creates an executor with the remaining time of the negotiation
+     *
      * @param timeline The timeline
      * @return An executor
      */
@@ -1176,7 +1246,7 @@ class NegLoader {
                     PersistentDataType.DISABLED);
             NegotiationInfo info = new NegotiationInfo(utilSpace, deadline, timeline, seed, agentID, storage);
             first_actions.put(agent_uuid, true);
-            is_strict.put(agent_uuid, strict);
+            isStrict.put(agent_uuid, strict);
             isRealTimeLimit.put(agent_uuid, strict);
             ids.put(agent_uuid, agentID);
             util_spaces.put(agent_uuid, utilSpace);
@@ -1199,12 +1269,37 @@ class NegLoader {
         return null;
     }
 
-    private String getAgentName(String agent_uuid) {
+    private String getName(String agent_uuid) throws InvalidObjectException {
+        Boolean isparty = isParty.get(agent_uuid);
+        if (isparty == null) {
+            if (is_debug) {
+                String msg = String.format("Agent %s does not exist", agent_uuid);
+                info(msg);
+            }
+            throw new InvalidObjectException(String.format("%s agent was not found. Cannot get name", agent_uuid));
+        }
+        if (isparty)
+            return ((AbstractNegotiationParty)parties.get(agent_uuid)).getPartyId().getName();
+        return ((Agent)agents.get(agent_uuid)).getName();
+    }
+
+    private String getDescription(String agent_uuid) {
         try {
-            if (this.is_party.get(agent_uuid))
+            if (this.isParty.get(agent_uuid))
                 return parties.get(agent_uuid).getDescription();
             else
                 return agents.get(agent_uuid).getDescription();
+        } catch (Exception e) {
+            return "UNKNOWN";
+        }
+    }
+    private String getNameAndDescription(String agent_uuid) {
+        try {
+            String name = get_name(agent_uuid);
+            if (this.isParty.get(agent_uuid))
+                return String.format("%s:%s", name, parties.get(agent_uuid).getDescription());
+            else
+                return String.format("%s:%s", name, agents.get(agent_uuid).getDescription());
         } catch (Exception e) {
             return "UNKNOWN";
         }
