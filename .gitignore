@@ -1,3 +1,5 @@
 PhoenixParty*
 deploy.sh
 genius-bridge-log.*
+/etc/
+/domainrepository.xml
