@@ -4,11 +4,11 @@
     <exclude-output />
     <content url="file://$MODULE_DIR$">
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
-      <excludeFolder url="file://$MODULE_DIR$/DataObjects" />
+      <excludeFolder url="file://$MODULE_DIR$/.idea" />
     </content>
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />
+    <orderEntry type="library" name="genius" level="project" />
     <orderEntry type="library" name="py4j0.10.8.1" level="project" />
-    <orderEntry type="library" name="genius-9.0.0" level="project" />
   </component>
 </module>

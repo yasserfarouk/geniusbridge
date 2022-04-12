@@ -1,0 +1,10 @@
+<component name="ArtifactManager">
+  <artifact type="jar" build-on-make="true" name="geniusbridge:jar">
+    <output-path>$PROJECT_DIR$/out/artifacts/geniusbridge_jar</output-path>
+    <root id="archive" name="geniusbridge.jar">
+      <element id="module-output" name="geniusbridge" />
+      <element id="extracted-dir" path="$PROJECT_DIR$/libs/genius.jar" path-in-jar="/" />
+      <element id="extracted-dir" path="$PROJECT_DIR$/libs/py4j0.10.8.1.jar" path-in-jar="/" />
+    </root>
+  </artifact>
+</component>
