@@ -3,3 +3,6 @@ deploy.sh
 genius-bridge-log.*
 /etc/
 /domainrepository.xml
+AGENTS.md
+TASKS.md
+PLAN.md

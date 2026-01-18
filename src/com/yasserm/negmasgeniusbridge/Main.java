@@ -27,6 +27,7 @@ import genius.core.logging.FileLogger;
 import genius.core.logging.XmlLogger;
 import genius.core.parties.*;
 import genius.core.persistent.DefaultPersistentDataContainer;
+import genius.core.persistent.PersistentDataContainer;
 import genius.core.persistent.PersistentDataType;
 import genius.core.protocol.MultilateralProtocol;
 import genius.core.protocol.Protocol;
@@ -43,6 +44,7 @@ import py4j.GatewayServer;
 import py4j.Py4JNetworkException;
 
 import java.io.*;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
@@ -102,6 +104,7 @@ class NegotiatorInfo {
     public Boolean firstAction = true;
     public ExecutorWithTimeout executor;
     public long timeout;
+    public int index;
 
     public NegotiatorInfo(NegotiationParty agent) {
         this.agent = agent;
@@ -368,24 +371,25 @@ class NegLoader {
      * @return version
      */
     private static String version() {
-        return "v0.2.4";
+        return "0.6.0";
     }
 
     /// Python Hooks: Methods called from python (they all have python snake_case
     /// naming convention)
 
     /**
-     * Creates a new agent (negmas Negotaitor)
+     * Creates a new agent (negmas Negotiator)
      *
      * @param class_name The class name of the negotiator to create
-     * @return If successful the UUID of the object created otherwise an FAILED
+     * @param indx       The index of this negotiator in the mechanism (used by NegMAS)
+     * @return If successful the UUID of the object created otherwise FAILED
      * @throws InstantiationException    Failed to create the agent
      * @throws IllegalAccessException    Failed to create the agent
      * @throws ClassNotFoundException    Failed to create the agent
      * @throws InvocationTargetException Failed to create the agent
      * @throws NoSuchMethodException     Failed to create the agent
      */
-    public String create_agent(String class_name) throws InstantiationException, IllegalAccessException, ClassNotFoundException, InvocationTargetException, NoSuchMethodException {
+    public String create_agent(String class_name, int indx) throws InstantiationException, IllegalAccessException, ClassNotFoundException, InvocationTargetException, NoSuchMethodException {
         try {
             Class<?> clazz = Class.forName(class_name);
             String uuid = class_name + UUID.randomUUID().toString();
@@ -395,12 +399,14 @@ class NegLoader {
             } else {
                 agent = (AgentAdapter) clazz.getDeclaredConstructor().newInstance();
             }
-            this.agents.put(uuid, new NegotiatorInfo(agent));
+            var info = new NegotiatorInfo(agent);
+            info.index = indx;
+            this.agents.put(uuid, info);
             nTotalAgents++;
             nActiveAgents++;
 
             if (isDebug) {
-                info(String.format("Creating Agent of type %s (ID= %s)\n", class_name, uuid));
+                info(String.format("Creating Agent of type %s (ID= %s, index= %d)\n", class_name, uuid, indx));
             } else {
                 this.printStatus();
             }
@@ -434,12 +440,14 @@ class NegLoader {
      * @param utility_file_name Preferences file name (ufun)
      * @param agent_timeout Time out for this agent
      * @param strict If given the bridge will just pass any exceptions to negmas (as well as failure of agents to choose an action)
+     * @param negotiator_ids Semicolon-separated list of negotiator IDs in the mechanism
      * @return OK if success, FAILED if failure, TIMEOUT if timedout
      * @throws ExecutionException The Genius agent threw an exception
      * @throws InvalidObjectException Cannot find the genius agent
      */
     public String on_negotiation_start(String agent_uuid, int n_agents, long n_steps, long time_limit, boolean real_time,
-                                       String domain_file_name, String utility_file_name, long agent_timeout, boolean strict) throws ExecutionException, InvalidObjectException {
+                                       String domain_file_name, String utility_file_name, long agent_timeout, boolean strict,
+                                       String negotiator_ids) throws ExecutionException, InvalidObjectException {
         this.nAgents = n_agents;
         if (isDebug) {
             info(String.format("Domain file: %s\nUfun: %s\nAgent: %s", domain_file_name, utility_file_name, agent_uuid));
@@ -792,7 +800,9 @@ class NegLoader {
         }
         for (Thread t : Thread.getAllStackTraces().keySet()) {
             if (current != t && t.getState() == Thread.State.RUNNABLE) {
-                t.stop();
+                // Modern way: interrupt again and let thread handle it gracefully
+                // Note: There's no safe way to forcibly stop a thread in modern Java
+                t.interrupt();
             }
         }
     }
@@ -1106,7 +1116,7 @@ class NegLoader {
             var agentID = new AgentID(agent_uuid);
             var storage = new DefaultPersistentDataContainer(new Serialize(),
                     PersistentDataType.DISABLED);
-            var info = new NegotiationInfo(utilSpace, deadline, timeline, seed, agentID, storage);
+            var info = createNegotiationInfoCompat(utilSpace, deadline, timeline, seed, agentID, storage);
             var agentInfo = agents.get(agent_uuid);
             var issues = (ArrayList<Issue>) utilSpace.getDomain().getIssues();
             var striss = new HashMap<String, Issue>();
@@ -1130,6 +1140,37 @@ class NegLoader {
 //            error(e.toString());
 //        }
 //        return null;
+    }
+
+    /**
+     * Creates a NegotiationInfo object compatible with multiple Genius versions.
+     * - Genius 9.1.x+ uses 8-param constructor with UserModel and User
+     * - Genius 9.0.0 uses 6-param constructor
+     */
+    private NegotiationInfo createNegotiationInfoCompat(
+        AbstractUtilitySpace utilSpace,
+        Deadline deadline,
+        TimeLineInfo timeline,
+        long seed,
+        AgentID agentID,
+        PersistentDataContainer storage) {
+
+        try {
+            // Try 8-param constructor (Genius 9.1.x+)
+            Class<?> userModelClass = Class.forName("genius.core.uncertainty.UserModel");
+            Class<?> userClass = Class.forName("genius.core.uncertainty.User");
+            Constructor<?> ctor = NegotiationInfo.class.getConstructor(
+                AbstractUtilitySpace.class, userModelClass, userClass,
+                Deadline.class, TimeLineInfo.class, long.class,
+                AgentID.class, PersistentDataContainer.class);
+            return (NegotiationInfo) ctor.newInstance(
+                utilSpace, null, null, deadline, timeline, seed, agentID, storage);
+        } catch (NoSuchMethodException | ClassNotFoundException e) {
+            // Fall back to 6-param constructor (Genius 9.0.0)
+            return new NegotiationInfo(utilSpace, deadline, timeline, seed, agentID, storage);
+        } catch (InvocationTargetException | InstantiationException | IllegalAccessException e) {
+            throw new RuntimeException("Failed to create NegotiationInfo", e);
+        }
     }
 
     private String getName(String agent_uuid) {
